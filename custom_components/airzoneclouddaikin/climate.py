@@ -3,7 +3,7 @@ from typing import Any, Dict, List, Optional
 from datetime import timedelta
 from homeassistant.const import UnitOfTemperature, ATTR_TEMPERATURE
 from homeassistant.util.unit_conversion import TemperatureConverter
-from homeassistant.helpers.entity import Entity
+from homeassistant.util import Throttle
 from homeassistant.components.climate import ClimateEntity
 from homeassistant.components.climate.const import (
     HVACMode,
@@ -16,6 +16,7 @@ _LOGGER = logging.getLogger(__name__)
 
 # default refresh interval
 SCAN_INTERVAL = timedelta(seconds=10)
+MIN_TIME_BETWEEN_UPDATES = timedelta(seconds=10)
 
 AIRZONECLOUD_DEVICE_HVAC_MODES = [
     HVACMode.OFF,
@@ -50,10 +51,11 @@ def setup_platform(hass, config, add_entities, discovery_info=None):
 
     entities = []
     for installation in api.installations:
+        # create a shared throttled refresh function per installation
+        # so multiple devices don't cause redundant API calls
+        throttled_refresh = Throttle(MIN_TIME_BETWEEN_UPDATES)(installation.refresh_devices)
         for device in installation.devices:
-            entities.append(AirzonecloudDaikinDevice(device))
-        # add installation to allow grouped update on all sub devices
-        entities.append(AirzonecloudDaikinInstallation(installation))
+            entities.append(AirzonecloudDaikinDevice(device, throttled_refresh))
 
     add_entities(entities)
 
@@ -61,9 +63,10 @@ def setup_platform(hass, config, add_entities, discovery_info=None):
 class AirzonecloudDaikinDevice(ClimateEntity):
     """Representation of an Airzonecloud Daikin Device"""
 
-    def __init__(self, azc_device):
+    def __init__(self, azc_device, refresh_installation):
         """Initialize the device"""
         self._azc_device = azc_device
+        self._refresh_installation = refresh_installation
         _LOGGER.info("init device {} ({})".format(self.name, self.unique_id))
 
     @property
@@ -179,33 +182,13 @@ class AirzonecloudDaikinDevice(ClimateEntity):
 
         return TemperatureConverter.convert(
             self._azc_device.max_temperature, UnitOfTemperature.CELSIUS, self.temperature_unit
-        )        
+        )
         """
         return convert_temperature(
             self._azc_device.max_temperature, TEMP_CELSIUS, self.temperature_unit
         )
         """
 
-
-class AirzonecloudDaikinInstallation(Entity):
-    """Representation of an Airzonecloud Daikin Installation"""
-
-    hidden = True  # default hidden
-
-    def __init__(self, azc_installation):
-        """Initialize the installation"""
-        self._azc_installation = azc_installation
-        _LOGGER.info("init installation {} ({})".format(self.name, self.unique_id))
-
-    @property
-    def unique_id(self) -> Optional[str]:
-        """Return a unique ID."""
-        return "installation_" + self._azc_installation.id
-
-    @property
-    def name(self):
-        """Return the name of the sensor."""
-        return self._azc_installation.name
-
     def update(self):
-        self._azc_installation.refresh_devices()
+        """Refresh device data from the API."""
+        self._refresh_installation()
